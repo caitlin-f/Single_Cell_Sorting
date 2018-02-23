@@ -12,9 +12,14 @@ import math
 import datetime
 
 # TODO: Avoid hard k-means, calculate genotype based on weighted contribution for likelihood of cell coming from genotype
-# TODO: Building matrix is slow
-# TODO: ?Change matrix building to search each read against vcf, rather than each pos in vcf against reads
-# TODO: ?Or build pileup and use that from beginning
+# TODO: Remove the h
+
+BASE_RR_PROB = 0.4995
+BASE_RA_PROB = 0.001
+BASE_AA_PROB = 0.4995
+MIN_POST_PROB = 1e-6
+PRECISION = 1e-16
+
 
 
 class SNV_data:
@@ -126,6 +131,22 @@ class model_genotype:
         self.assigned = assigned
         self.model_genotypes = model_genotypes
 
+        self.assign_cells_llhood = []
+        for n in range(num):
+            self.assign_cells_llhood.append([])
+            self.assign_cells_llhood[n] = pd.DataFrame(
+                np.ones((len(self.all_SNVs), 3)),
+                index=SNV_data.get_all_SNV_pos(self.all_SNVs),
+                columns=['RR', 'RA', 'AA'])
+
+        self.model_llhood = []
+        for n in range(num):
+            self.model_llhood.append([])
+            self.model_llhood[n] = pd.DataFrame(
+                np.ones((len(self.all_SNVs), 3)),
+                index=SNV_data.get_all_SNV_pos(self.all_SNVs),
+                columns=['RR', 'RA', 'AA'])
+
         if self.model_genotypes == []:
             for n in range(num):
                 self.model_genotypes.append([])
@@ -133,9 +154,6 @@ class model_genotype:
                     np.zeros((len(self.all_SNVs), 3)),
                     index=SNV_data.get_all_SNV_pos(self.all_SNVs),
                     columns=['RR', 'RA', 'AA'])
-
-                # if self.assigned == None:
-                #     self.assigned = self.initialise_cell_assignments()
 
     def initialise_cell_assignments(self):
         """ Random initialisation of cell assignments"""
@@ -158,55 +176,87 @@ class model_genotype:
                 self.model_genotypes[n].loc[pos] = (
                     gt[0][n], gt[1][n], gt[2][n])
 
-
-
-                # s = np.random.dirichlet((RR,RA,AA),2).transpose()
-                # gives model 1: <s[0][0], s[1][0], s[2][0]>  model 2: <s[0][1], s[1][1], s[2][1] >
-
     def calculate_model_genotypes(self):
         """
         Calculates a probability distribution <RR, RA, AA> for each SNV position based on counts of bases
         """
-
-        for n in range(self.num):  # for the number of genotypes to model
-            for snv in self.all_SNVs:  # for each snv position
-                if len(snv.REF) == 1 and len(snv.ALT) == 1:  # skip indels
-                    pos = "{}:{}".format(snv.CHROM, snv.POS)
+        # TODO: How to handle when no snv calls at a position for that model
+        coverage = [0, 0]
+        no_coverage = [0, 0]
+        for m in range(self.num):
+            self.model_llhood[m].loc[:] = 1
+        for snv in self.all_SNVs:  # for each snv position
+            if len(snv.REF) == 1 and len(snv.ALT) == 1:  # skip indels
+                pos = "{}:{}".format(snv.CHROM, snv.POS)
+                for n in range(
+                        self.num):  # for the number of genotypes being modelled
                     cluster = self.assigned[n]  # list of barcodes
-                    ref_count = sum(self.ref_bc_mtx.loc[
-                                        pos, cluster])  # snv base calls for cells assigned to model, returns pandas.Series
-                    alt_count = sum(self.alt_bc_mtx.loc[pos, cluster])
-                    if ref_count > 0 or alt_count > 0:  # if cells in genotype carry reads at this snv
-                        llhood = self.calc_model_likelihood(ref_count,
-                                                            alt_count)
 
-                        P_RR_given_D, P_RA_given_D, P_AA_given_D = self.calc_model_posterior(
-                            llhood)
+                    # get snv base calls for cells assigned to model, returns pandas.Series
+                    ref_count = sum(self.ref_bc_mtx.loc[pos, cluster])
+                    alt_count = sum(self.alt_bc_mtx.loc[pos, cluster])
+
+                    if ref_count > 0 or alt_count > 0:  # if cells in genotype carry reads at this snv
+                        coverage[n] += 1
+                        llhood = self.calc_model_likelihood(
+                            ref_count, alt_count, pos)
+                        self.model_llhood[n].loc[pos] = llhood
+
+                        P_RR_given_D, P_RA_given_D, P_AA_given_D = \
+                            self.calc_model_posterior(llhood)
                         self.model_genotypes[n].loc[pos] = (
                             P_RR_given_D, P_RA_given_D, P_AA_given_D)
+                    else:
+                        no_coverage[n] += 1
+                        self.model_genotypes[n].loc[pos] = \
+                            (BASE_RR_PROB, BASE_RA_PROB, BASE_AA_PROB)
+        print("Coverage for model 1 = {}, no coverage = {}".format(
+            coverage[0], no_coverage[0]))
+        print("Coverage for model 2 = {}, no coverage = {}".format(
+            coverage[1], no_coverage[1]))
 
-    def calc_model_likelihood(self, ref_count, alt_count):
+    def calc_model_likelihood(self, ref_count, alt_count, pos):
         """
-        Calculates likelihood (P(D|G))
+        Calculates log likelihood (P(D|G))
         Parameters:
             ref_count: count of reference base calls
             alt_count: count of alternate base calls
+
+        https://stats.stackexchange.com/questions/66616/converting-normalizing-very-small-likelihood-values-to-probability
         """
         e_rate = 0.01
 
-        # Note these should actually be **ref_count and *=
+        log_precision_on_n = math.log2(PRECISION / 3)
+
+        # Sum log, product normal
 
         # reference count
-        P_D_given_RR = (1 - e_rate) * ref_count
-        P_D_given_RA = (0.5 - (e_rate / 3)) * ref_count
-        P_D_given_AA = (e_rate / 3) * ref_count
+        lRR = math.log2(1 - e_rate) * ref_count
+        lRA = math.log2(0.5 - (e_rate / 3)) * ref_count
+        lAA = math.log2(e_rate / 3) * ref_count
         # alternate count
-        P_D_given_RR += (e_rate / 3) * alt_count
-        P_D_given_RA += (0.5 - (e_rate / 3)) * alt_count
-        P_D_given_AA += (1 - e_rate) * alt_count
+        lRR += math.log2(e_rate / 3) * alt_count
+        lRA += math.log2(0.5 - (e_rate / 3)) * alt_count
+        lAA += math.log2(1 - e_rate) * alt_count
 
-        return (math.log10(P_D_given_RR), math.log10(P_D_given_RA),
-                math.log10(P_D_given_AA))
+        maximum = max(lRR, lRA, lAA)
+        RR = self.check_log_value(lRR, maximum)
+        RA = self.check_log_value(lRA, maximum)
+        AA = self.check_log_value(lAA, maximum)
+
+        denom = RR + RA + AA
+        P_D_given_RR = RR / denom
+        P_D_given_RA = RA / denom
+        P_D_given_AA = AA / denom
+
+        return (P_D_given_RR, P_D_given_RA, P_D_given_AA)
+
+    def check_log_value(self, prob, maximum):
+        log_precision_on_n = math.log2(PRECISION / 3)
+        if (prob - maximum) < log_precision_on_n:
+            return 0
+        else:
+            return math.pow(2, prob - maximum)
 
     def calc_model_posterior(self, llhood):
         """
@@ -220,20 +270,18 @@ class model_genotype:
         P_hom = (1 - h) / 4
         P_het = h / 6
 
-        z = (math.pow(10, P_D_given_RR) * P_hom + math.pow(
-            10, P_D_given_RA) * P_het + math.pow(10, P_D_given_AA) * P_hom)
+        z = (P_D_given_RR * P_hom) + \
+            (P_D_given_RA * P_het) + \
+            (P_D_given_AA * P_hom)
 
-        try:
-            P_RR_given_D = P_D_given_RR + math.log10(P_hom) - math.log10(z)
-            P_RA_given_D = P_D_given_RA + math.log10(P_het) - math.log10(z)
-            P_AA_given_D = P_D_given_AA + math.log10(P_hom) - math.log10(z)
+        P_RR_given_D = (P_D_given_RR * P_hom) / z
+        P_RA_given_D = (P_D_given_RA * P_het) / z
+        P_AA_given_D = (P_D_given_AA * P_hom) / z
 
-        except ValueError:  # Get value error when z is 0 (due to llhood being large negatives)
-            print("value error for math.log10(z)", P_D_given_RR, P_D_given_RA,
-                  P_D_given_AA)
-            P_RR_given_D = P_D_given_RR + math.log10(P_hom)
-            P_RA_given_D = P_D_given_RA + math.log10(P_het)
-            P_AA_given_D = P_D_given_AA + math.log10(P_hom)
+        for prob in [P_RR_given_D, P_RA_given_D, P_AA_given_D]:
+            if prob < MIN_POST_PROB:
+                prob = MIN_POST_PROB
+
         return (P_RR_given_D, P_RA_given_D, P_AA_given_D)
 
     def assign_cells(self):
@@ -262,45 +310,59 @@ class model_genotype:
             self.assigned.append([])
 
         e = 0.01
+        self.old_llhood = self.assign_cells_llhood
+        for m in range(self.num):
+            self.assign_cells_llhood[m].loc[:] = 1
 
         for barcode in self.barcodes:  # for each cell
 
-            cell_llhood = []  # list of likelihood values of cell/barcode c for model 1 to n
-
+            cell_llhood = []  # store likelihood values of cell/barcode c for model 1 to n
+            indices = []  # index of non-zero values in column
+            for idx in self.ref_bc_mtx.loc[:, barcode].nonzero():
+                indices.extend(idx)
+            for idx in self.alt_bc_mtx.loc[:, barcode].nonzero():
+                indices.extend(idx)
             for n in range(self.num):  # for each model
-                all_var_llhood = 1  # store product over all variants
-                for snv in self.all_SNVs:  # for each variant
+
+                all_var_llhood = 1  # store product over all variants for model n
+
+                for i in indices:  # for each variant with non-zero values in this cell
+                    snv = self.all_SNVs[i]
                     pos = "{}:{}".format(snv.CHROM, snv.POS)
-                    RR, RA, AA = self.model_genotypes[n].loc[pos]  # in log10
-                    if self.ref_bc_mtx.loc[pos, barcode] != 0 or \
-                                    self.alt_bc_mtx.loc[
-                                        pos, barcode] != 0:  # there is coverage in this position for this barcode
-                        ref_count = self.ref_bc_mtx.loc[pos, barcode]
-                        alt_count = self.alt_bc_mtx.loc[pos, barcode]
-                        # sum log over all base counts (or product normal)
-                        # calculate reference
-                        P_D_given_RR = (math.log10(1 - e) + RR) * ref_count
-                        P_D_given_RA = (
-                                       math.log10(0.5 - e / 3) + RA) * ref_count
-                        P_D_given_AA = (math.log10(e / 3) + AA) * ref_count
+                    RR, RA, AA = self.model_genotypes[n].loc[pos]
 
-                        # calculate alternate
-                        P_D_given_RR += (math.log10(e / 3) + RR) * alt_count
-                        P_D_given_RR += (math.log10(
-                            0.5 - e / 3) + RA) * alt_count
-                        P_D_given_AA += (math.log10(1 - e) + AA) * alt_count
+                    ref_count = self.ref_bc_mtx.loc[pos, barcode]
+                    alt_count = self.alt_bc_mtx.loc[pos, barcode]
 
-                        # Sum over all genotypes at variant position
-                        P_D_given_G = math.pow(10, P_D_given_RR) + math.pow(10,
-                                                                            P_D_given_RA) + math.pow(
-                            10, P_D_given_AA)
-                        # Product over all variant positions
-                        all_var_llhood *= P_D_given_G
+                    # sum log over all base counts (or product normal)
+                    # calculate reference
+                    P_D_given_RR = ((1 - e) * RR) ** ref_count
+                    P_D_given_RA = ((0.5 - e / 3) * RA) ** ref_count
+                    P_D_given_AA = ((e / 3) * AA) ** ref_count
+
+                    # calculate alternate
+                    P_D_given_RR *= ((e / 3) * RR) ** alt_count
+                    P_D_given_RR *= ((0.5 - e / 3) * RA) ** alt_count
+                    P_D_given_AA *= ((1 - e) * AA) ** alt_count
+
+                    # for each snv sum log likelihood for genotype
+                    self.assign_cells_llhood[n].loc[pos, 'RR'] *= P_D_given_RR
+                    self.assign_cells_llhood[n].loc[pos, 'RA'] *= P_D_given_RA
+                    self.assign_cells_llhood[n].loc[pos, 'AA'] *= P_D_given_AA
+
+                    # Sum over all genotypes at variant position
+                    P_D_given_G = P_D_given_RR + \
+                                  P_D_given_RA + \
+                                  P_D_given_AA
+                    # Product over all variant positions
+                    all_var_llhood *= P_D_given_G
 
                 cell_llhood.append(all_var_llhood)
-
+            # if likelihoood is equal in cases such as:
+            # 1. barcode has no coverage over any snv region
+            # 2. barcode covers only snv regions where <RR, RA, AA> is same for all model genotypes
             if all(i == cell_llhood[0] for i in
-                   cell_llhood):  # if likelihoood is equal
+                   cell_llhood):
                 pass
             # for n in range(self.num):
             #                     self.assigned[n].append(barcode)
@@ -315,6 +377,13 @@ class model_genotype:
         for n in range(self.num):
             old = self.old_assignment[n]
             new = self.assigned[n]
+            count = 0
+            for item in new:
+                if item in old:
+                    count += 1
+            print('{}% of barcodes in new also in old'.format(
+                count * 100 / len(new)))
+
             sm = jaccard_similarity(old, new)
             dif.append(sm)
         return dif
@@ -360,12 +429,12 @@ def build_base_calls_matrix(sam_filename, all_SNVs, all_POS, barcodes):
         if pos not in all_POS:
             all_POS.append(pos)
     print("Searching positions: 0 - 1000000")
-    m = 1000000
+    m = 10000
     for snv in all_SNVs:
         position = str(snv.CHROM) + ':' + str(snv.POS)
         if snv.POS/m >= 1:
-            print("Searching positions: {} - {}".format(m,m+1000000))
-            m += 1000000
+            print("Searching positions: {} - {}".format(m,m+10000))
+            m += 10000
         for pileupcolumn in in_sam.pileup(snv.CHROM, snv.POS-1, snv.POS, truncate=True):  # pysam uses 0 based positions
             for pileupread in pileupcolumn.pileups:
                 if not pileupread.is_del and not pileupread.is_refskip:
@@ -379,6 +448,7 @@ def build_base_calls_matrix(sam_filename, all_SNVs, all_POS, barcodes):
                             alt_base_calls_mtx.loc[position, barcode] += 1
 
     return (ref_base_calls_mtx, alt_base_calls_mtx)
+
 
 
 def get_read_barcodes(sam_file, chr, pos, readname):
@@ -408,15 +478,19 @@ def get_read_barcodes(sam_file, chr, pos, readname):
 def run_model(all_SNVs, base_calls_mtx, barcodes, num_models):
     model = model_genotype(all_SNVs, base_calls_mtx, barcodes, num_models, model_genotypes=[], assigned=None)
     dif = [0 for _ in range(num_models)]
-    print("\ninitialising model genotypes")
+    print("\ninitialising model genotypes", datetime.datetime.now().time())
     model.initialise_model_genotypes()
-    print("initial cell assignments")
+    print("initial cell assignments", datetime.datetime.now().time())
     model.assign_cells()
+    length=[]
+    for assigned in model.assigned:
+        length.append(len(assigned))
+    print(length)
     print("Commencing E-M")
-    while all(i < 0.99 for i in dif):
+    while (any(i < 0.80 for i in dif) == True):
         print("calculating model ", datetime.datetime.now().time())
         model.calculate_model_genotypes()
-        print("assigning cells")
+        print("assigning cells", datetime.datetime.now().time())
         model.assign_cells()
         old_dif = dif
         dif = model.compare_cell_assignments()
@@ -435,6 +509,7 @@ def jaccard_similarity(x,y):
     intersect = len(set.intersection(*[set(x), set(y)]))
     union = len(set.union(*[set(x), set(y)]))
     return intersect/float(union)
+
 
 
 
