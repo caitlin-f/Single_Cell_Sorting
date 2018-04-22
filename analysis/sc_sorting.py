@@ -21,7 +21,6 @@ MIN_POST_PROB = 1e-6
 PRECISION = 1e-16
 
 
-
 class SNV_data:
     """
     Stores data on each SNV
@@ -42,7 +41,6 @@ class SNV_data:
         self.ALT = alt
         self.loglik = loglik
         self.RR, self.RA, self.AA = self._calculate_genotype(loglik)
-
 
     def _calculate_genotype(self, loglik):
         """
@@ -65,12 +63,12 @@ class SNV_data:
         """
         llikRR, llikRA, llikAA = loglik
 
-        likRR = 10**llikRR
-        likRA = 10**llikRA
-        likAA = 10**llikAA
+        likRR = 10 ** llikRR
+        likRA = 10 ** llikRA
+        likAA = 10 ** llikAA
 
         # get probability of the most likely allele that everything was normalised to
-        pmax = 1/(likRR + likRA + likAA)
+        pmax = 1 / (likRR + likRA + likAA)
 
         # Calcuate allele probabilities
         RR = likRR * pmax
@@ -78,7 +76,6 @@ class SNV_data:
         AA = likAA * pmax
 
         return RR, RA, AA
-
 
     def get_all_SNV_pos(all_SNVs):
         """
@@ -415,15 +412,15 @@ def build_base_calls_matrix(sam_filename, all_SNVs, all_POS, barcodes):
         all_POS(list('chr:pos)): snv positions (1-based positions from vcf file)
         barcodes(list): cell barcodes
     """
-    #TODO: fix up index names (in case of duplicate position)
+    # TODO: fix up index names (in case of duplicate position)
 
     in_sam = ps.AlignmentFile(sam_filename, 'rb')
     ref_base_calls_mtx = pd.DataFrame(np.zeros((len(all_POS), len(barcodes))),
-                                  index=all_POS, columns=barcodes)
+                                      index=all_POS, columns=barcodes)
     alt_base_calls_mtx = pd.DataFrame(np.zeros((len(all_POS), len(barcodes))),
                                       index=all_POS, columns=barcodes)
 
-    print('Matrix size: Num Pos:', len(all_POS), 'Num barcodes:',len(barcodes))
+    print('Matrix size: Num Pos:', len(all_POS), 'Num barcodes:', len(barcodes))
 
     all_POS = []
     for entry in all_SNVs:
@@ -432,13 +429,16 @@ def build_base_calls_matrix(sam_filename, all_SNVs, all_POS, barcodes):
             all_POS.append(pos)
     for snv in all_SNVs:
         position = str(snv.CHROM) + ':' + str(snv.POS)
-        for pileupcolumn in in_sam.pileup(snv.CHROM, snv.POS-1, snv.POS, truncate=True):  # pysam uses 0 based positions
+        for pileupcolumn in in_sam.pileup(snv.CHROM, snv.POS - 1, snv.POS,
+                                          truncate=True):  # pysam uses 0 based positions
             for pileupread in pileupcolumn.pileups:
                 if not pileupread.is_del and not pileupread.is_refskip:
-                    barcode = get_read_barcodes(sam_filename, snv.CHROM, snv.POS,
+                    barcode = get_read_barcodes(sam_filename, snv.CHROM,
+                                                snv.POS,
                                                 pileupread.alignment.query_name)
                     if barcode is not None:
-                        base = pileupread.alignment.query_sequence[pileupread.query_position]
+                        base = pileupread.alignment.query_sequence[
+                            pileupread.query_position]
                         if base == snv.REF:
                             ref_base_calls_mtx.loc[position, barcode] += 1
                         if base == snv.ALT:
@@ -446,6 +446,18 @@ def build_base_calls_matrix(sam_filename, all_SNVs, all_POS, barcodes):
 
     return (ref_base_calls_mtx, alt_base_calls_mtx)
 
+
+def read_base_calls_matrix(path, out_dir, out_csv_ref, out_csv_alt):
+    """ Read in an existing matrix from a csv file"""
+    base_calls_mtx = []
+    print('reading in reference matrix')
+    base_calls_mtx.append(pd.read_csv(
+        '{}{}{}'.format(path, out_dir, out_csv_ref), header=0, index_col=0))
+    print('reading in alternate matrix')
+    base_calls_mtx.append(pd.read_csv(
+        '{}{}{}'.format(path, out_dir, out_csv_alt), header=0, index_col=0))
+    print("Base call matrix finished", datetime.datetime.now().time())
+    return base_calls_mtx
 
 
 def get_read_barcodes(sam_file, chr, pos, readname):
@@ -459,21 +471,60 @@ def get_read_barcodes(sam_file, chr, pos, readname):
          pos: position of snv
          readname: unique read name in sam file
     """
-    loc = "{0}:{1}-{2}".format(chr,int(pos)-1, int(pos)+1)
-    cmd = ['samtools', 'view', sam_file,loc]
+    loc = "{0}:{1}-{2}".format(chr, int(pos) - 1, int(pos) + 1)
+    cmd = ['samtools', 'view', sam_file, loc]
     result = subprocess.check_output(cmd)
     for entry in str(result).lstrip('b\'').split('\\n'):
         if (entry.split("\\t")[0]) == readname:
             try:
                 return (entry.split('CB:Z:')[1].split('\\tUR:Z:')[0])
             except IndexError:
-                print('No CB tag for', readname) # can return error if no CB tag attached to read in bam file
+                print('No CB tag for',
+                      readname)  # can return error if no CB tag attached to read in bam file
         else:
             continue
 
 
+def group_models(all_models):
+    """Group models from multiple runs based on similarity of barcode
+    assignments"""
+    for e, model in enumerate(all_models):
+        if e == 0:  # first iteration
+            model_A = [model.assigned[0]]
+            model_B = [model.assigned[1]]
+        else:
+            # compare current two to first model entered in A and B
+            for n in range(2):
+                smA = jaccard_similarity(model_A[0], model.assigned[n])
+                smB = jaccard_similarity(model_B[0], model.assigned[n])
+                print("model_A to model{}[{}] :".format(e + 1, n), smA)
+                print("model_B to model{}[{}] :".format(e + 1, n), smB)
+
+                match = (smA, smB).index(max(smA, smB))
+                if match == 0:
+                    model_A.append(model.assigned[n])
+                elif match == 1:
+                    model_B.append(model.assigned[n])
+    return model_A, model_B
+
+
+def compare_model_groups(model_group, group_name):
+    for n in range(len(model_group)):
+        for m in range(n + 1, len(model_group)):
+            sm = jaccard_similarity(model_group[n], model_group[m])
+            print("{}[{}], {}[{}]: {}".format(group_name, n + 1,
+                                              group_name, m + 1, sm))
+
+
+def jaccard_similarity(x, y):
+    intersect = len(set.intersection(*[set(x), set(y)]))
+    union = len(set.union(*[set(x), set(y)]))
+    return intersect / float(union)
+
+
 def run_model(all_SNVs, base_calls_mtx, barcodes, num_models):
-    model = model_genotype(all_SNVs, base_calls_mtx, barcodes, num_models, model_genotypes=[], assigned=None)
+    model = model_genotype(all_SNVs, base_calls_mtx, barcodes, num_models,
+                           model_genotypes=[], assigned=None)
     dif = [0 for _ in range(num_models)]
     print("\ninitialising model genotypes", datetime.datetime.now().time())
     model.initialise_model_genotypes()
@@ -484,7 +535,8 @@ def run_model(all_SNVs, base_calls_mtx, barcodes, num_models):
         length.append(len(assigned))
     print(length)
     print("Commencing E-M")
-    while any(i < 0.80 for i in dif): # dif between current and prev cell assignments
+    while any(i < 0.80 for i in
+              dif):  # dif between current and prev cell assignments
         print("calculating model ", datetime.datetime.now().time())
         model.calculate_model_genotypes()
         print("assigning cells", datetime.datetime.now().time())
@@ -502,47 +554,47 @@ def run_model(all_SNVs, base_calls_mtx, barcodes, num_models):
     return model
 
 
-def jaccard_similarity(x,y):
-    intersect = len(set.intersection(*[set(x), set(y)]))
-    union = len(set.union(*[set(x), set(y)]))
-    return intersect/float(union)
-
-
 
 
 def main():
+    build_matrix = False
+    read_matrix = True
+    num_runs = 3
+    num_models = 2
+
+    # filepaths
     path = '/Users/Caitlin/Documents/Bioinformatics/Summer_Project_2017/analysis/'
     out_dir = 'data/'
-    outfile_A = 'pbmc50mix/model_A{}_chr1.txt'
-    outfile_B = 'pbmc50mix/model_B{}_chr1.txt'
-    out_csv_ref = 'pbmc50mix/ref_chr1.csv'
-    out_csv_alt = 'pbmc50mix/alt_chr1.csv'
 
 
-    # # 50:50 10k
-    # file_v = "pbmc50mix/pbmc50_10k.vcf"
-    # file_s = "pbmc50mix/pbmc_50_50_10k.bam"
-    # file_bc = "pbmc50mix/bc_sorted_10k.txt"
+    """ The following is various files used while testing the program
+    file_v = .vcf file
+    file_s = .bam file
+    file_bc = .txt file of all known and checked barcodes
+    """
 
-    # # 50:50 files 100k
-    # file_v = "pbmc50mix/pbmc50_100k.vcf"
-    # file_s = "pbmc50mix/pbmc50_100k_bc_only.bam"
-    # file_bc = "pbmc50mix/barcodes50_100k_sorted.txt"
+    # # 50:50 chr1
+    # file_v = "pbmc50mix/pbmc_chr1.vcf"
+    # file_s = "pbmc50mix/pbmc_chr1_cleaned.bam"
+    # file_bc = "pbmc50mix/pbmc_chr1_cleaned_bc.txt"
+    # # output/input files for snv-bc matrix
+    # out_csv_ref = 'pbmc50mix/ref_chr1.csv'
+    # out_csv_alt = 'pbmc50mix/alt_chr1.csv'
+    # # output files for barcode assignments
+    # # required format dir/model_A{}_details.txt (A, B if modelling 2 genotypes_
+    # outfile_A = 'pbmc50mix/model_A{}.txt'
+    # outfile_B = 'pbmc50mix/model_B{}.txt'
 
-    # # 50:50 files 500k
-    # file_v = "pbmc50mix/pbmc50_500k.vcf"
-    # file_s = "pbmc50mix/pbmc50_500k_bc_only.bam"
-    # file_bc = "pbmc50mix/barcodes50_500k_sorted.txt"
 
-    # 50:50 chr1
-    file_v = "pbmc50mix/pbmc_chr1.vcf"
-    file_s = "pbmc50mix/pbmc_chr1_cleaned.bam"
-    file_bc = "pbmc50mix/pbmc_chr1_cleaned_bc.txt"
+    # Mixed donor files
+    file_v = "pbmc_A-C_mix/pbmc_30k.vcf"
+    file_s = "pbmc_A-C_mix/pbmc_30k_bc_only.bam"
+    file_bc = "pbmc_A-C_mix/bc_30k_sorted.txt"
+    out_csv_ref = 'pbmc_A-C_mix/ref_30k.csv'
+    out_csv_alt = 'pbmc_A-C_mix/alt_30k.csv'
+    outfile_A = 'pbmc_A-C_mix/model_A{}_30k.txt'
+    outfile_B = 'pbmc_A-C_mix/model_B()_30k.txt'
 
-    # # Mixed donor files
-    # file_v = "pbmc_A-C_mix/pbmc_30k.vcf"
-    # file_s = "pbmc_A-C_mix/pbmc_30k_bc_only.bam"
-    # file_bc = "pbmc_A-C_mix/bc_30k_sorted.txt"
 
     vcf_filename = str(path + out_dir + file_v)
     sam_filename = str(path + out_dir + file_s)
@@ -568,18 +620,24 @@ def main():
     print("Starting data collection", datetime.datetime.now().time())
     all_POS = SNV_data.get_all_SNV_pos(all_SNVs)
     barcodes = get_all_barcodes(bc_filename)
-    base_calls_mtx = build_base_calls_matrix(sam_filename, all_SNVs, all_POS,
-                                             barcodes)
-    base_calls_mtx[0].to_csv('{}{}{}'.format(path, out_dir, out_csv_ref))
-    base_calls_mtx[1].to_csv('{}{}{}'.format(path, out_dir, out_csv_alt))
-    print("Base call matrix finished", datetime.datetime.now().time())
 
+    if build_matrix:
+        base_calls_mtx = build_base_calls_matrix(sam_filename, all_SNVs,
+                                                 all_POS,barcodes)
+        base_calls_mtx[0].to_csv('{}{}{}'.format(path, out_dir, out_csv_ref))
+        base_calls_mtx[1].to_csv('{}{}{}'.format(path, out_dir, out_csv_alt))
+        print("Base call matrix finished", datetime.datetime.now().time())
+
+    if read_matrix:
+        base_calls_mtx = read_base_calls_matrix(path, out_dir, out_csv_ref,
+                                                out_csv_alt)
 
     # show some data entered okay by entering location of last entry in vcf
     # majority of bases should match ref and alt in vcf above
     location = "{}:{}".format(all_SNVs[-1].CHROM, all_SNVs[-1].POS)
     print("RR,RA,AA : <", all_SNVs[-1].RR, all_SNVs[-1].RA, all_SNVs[-1].AA,
           ">")
+
     alt = 0
     ref = 0
 
@@ -589,48 +647,23 @@ def main():
         alt += base
     print("Reference count:", ref, "; Alternate count:", alt)
 
-
-    num_runs = 3
-    num_models = 2
-
     all_models = []
     for run in range(num_runs):
         model = run_model(all_SNVs, base_calls_mtx, barcodes, num_models)
         all_models.append(model)
-        print("Finished model {} at {}".format(run + 1, datetime.datetime.now().time()))
+        print("Finished model {} at {}".format(run + 1,
+                                               datetime.datetime.now().time()))
 
     print("\nFinished all models... Comparing models...")
 
-    # Separate models output by multiple runs based on similarity to each other
-    for e, model in enumerate(all_models):
-        if e == 0:  # first iteration
-            model_A = [model.assigned[0]]
-            model_B = [model.assigned[1]]
-        else:
-            # compare current two to first model entered in A and B
-            for n in range(2):
-                smA = jaccard_similarity(model_A[0], model.assigned[n])
-                smB = jaccard_similarity(model_B[0], model.assigned[n])
-                print("model_A to model{}[{}] :".format(e + 1, n), smA)
-                print("model_B to model{}[{}] :".format(e + 1, n), smB)
+    # separate models into groups based on similarity of barcode assignments
+    model_A, model_B = group_models(all_models)
 
-                match = (smA, smB).index(max(smA, smB))
-                if match == 0:
-                    model_A.append(model.assigned[n])
-                elif match == 1:
-                    model_B.append(model.assigned[n])
+    # compare models between each grouped member
+    compare_model_groups(model_A, "model_A")
+    compare_model_groups(model_B, "model_B")
 
-    for n in range(len(model_A)):
-        for m in range(n + 1, len(model_A)):
-            sm = jaccard_similarity(model_A[n], model_A[m])
-            print("model_A-{}, model_A-{} :".format(n + 1, m + 1), sm)
-
-    for n in range(len(model_B)):
-        for m in range(n + 1, len(model_B)):
-            sm = jaccard_similarity(model_B[n], model_B[m])
-            print("model_B-{}, model_B-{} :".format(n + 1, m + 1), sm)
-
-
+    # save the output barcode assignments
     for m, model in enumerate(model_A):
         filename = '{}{}{}'.format(path, out_dir, outfile_A).format(m + 1)
         file = open(filename, "w")
@@ -644,6 +677,7 @@ def main():
         for barcode in model:
             file.write(barcode + '\n')
         file.close()
+
 
 if __name__ == "__main__":
     main()
