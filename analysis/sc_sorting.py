@@ -180,7 +180,7 @@ class model_genotype:
         """
         Calculates a probability distribution <RR, RA, AA> for each SNV position based on counts of bases
         """
-        # TODO: How to handle when no snv calls at a position for that model
+        # TODO: ?How to handle when no snv calls at a position for that model
         coverage = [0, 0]
         no_coverage = [0, 0]
         for m in range(self.num):
@@ -266,7 +266,7 @@ class model_genotype:
         """
         P_D_given_RR, P_D_given_RA, P_D_given_AA = llhood
 
-        h = 0.001  # uniform heterozygosity rate
+        h = 0.001  # uniform heterozygosity rate per Duitama 2012
         P_hom = (1 - h) / 4
         P_het = h / 6
 
@@ -278,9 +278,11 @@ class model_genotype:
         P_RA_given_D = (P_D_given_RA * P_het) / z
         P_AA_given_D = (P_D_given_AA * P_hom) / z
 
-        for prob in [P_RR_given_D, P_RA_given_D, P_AA_given_D]:
+        probs = [P_RR_given_D, P_RA_given_D, P_AA_given_D]
+        # set minimum probability
+        for n, prob in enumerate(probs):
             if prob < MIN_POST_PROB:
-                prob = MIN_POST_PROB
+                probs[n] = MIN_POST_PROB
 
         return (P_RR_given_D, P_RA_given_D, P_AA_given_D)
 
@@ -428,13 +430,8 @@ def build_base_calls_matrix(sam_filename, all_SNVs, all_POS, barcodes):
         pos = str(entry.CHROM) + ':' + str(entry.POS)
         if pos not in all_POS:
             all_POS.append(pos)
-    print("Searching positions: 0 - 1000000")
-    m = 10000
     for snv in all_SNVs:
         position = str(snv.CHROM) + ':' + str(snv.POS)
-        if snv.POS/m >= 1:
-            print("Searching positions: {} - {}".format(m,m+10000))
-            m += 10000
         for pileupcolumn in in_sam.pileup(snv.CHROM, snv.POS-1, snv.POS, truncate=True):  # pysam uses 0 based positions
             for pileupread in pileupcolumn.pileups:
                 if not pileupread.is_del and not pileupread.is_refskip:
@@ -455,7 +452,7 @@ def get_read_barcodes(sam_file, chr, pos, readname):
     """
     Get the cell barcode (CB tag information) from sam file
     Pysam does not hold this information therefore requires use of the
-    command line functions.
+    external samtools functions.
     Parameters:
          sam_file: Absolute location of sam/bam file
          chr: chromosome name in sam
@@ -482,19 +479,19 @@ def run_model(all_SNVs, base_calls_mtx, barcodes, num_models):
     model.initialise_model_genotypes()
     print("initial cell assignments", datetime.datetime.now().time())
     model.assign_cells()
-    length=[]
+    length = []
     for assigned in model.assigned:
         length.append(len(assigned))
     print(length)
     print("Commencing E-M")
-    while (any(i < 0.80 for i in dif) == True):
+    while any(i < 0.80 for i in dif): # dif between current and prev cell assignments
         print("calculating model ", datetime.datetime.now().time())
         model.calculate_model_genotypes()
         print("assigning cells", datetime.datetime.now().time())
         model.assign_cells()
         old_dif = dif
         dif = model.compare_cell_assignments()
-        length=[]
+        length = []
         for assigned in model.assigned:
             length.append(len(assigned))
         print(length)
